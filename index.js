@@ -1,8 +1,6 @@
 require("dotenv").config();
 
 const express = require("express");
-const { Readable } = require("stream");
-
 const {
   Client,
   GatewayIntentBits,
@@ -14,22 +12,18 @@ const {
   Partials
 } = require("discord.js");
 
-const {
-  joinVoiceChannel,
-  getVoiceConnection,
-  entersState,
-  VoiceConnectionStatus,
-  createAudioPlayer,
-  createAudioResource,
-  AudioPlayerStatus,
-  StreamType
-} = require("@discordjs/voice");
-
-// ============ CRASH LOGS (çok önemli) ============
+// Crash logs
 process.on("unhandledRejection", (err) => console.error("UNHANDLED:", err));
 process.on("uncaughtException", (err) => console.error("UNCAUGHT:", err));
 
-// ============ CONFIG ============
+// =====================
+// CONFIG
+// =====================
+const token = (process.env.DISCORD_TOKEN || "").trim();
+if (!token) {
+  console.error("❌ DISCORD_TOKEN yok/boş!");
+}
+
 const LOG_CHANNEL_ID = "1462333582168297533";
 const TICKET_CATEGORY_ID = "1459655075134968033";
 const SUPPORT_ROLE_ID = "1459657415657001215";
@@ -37,48 +31,54 @@ const GUILD_ID = process.env.GUILD_ID || null;
 
 let autoroleId = process.env.AUTOROLE_ID || null;
 
-const token = (process.env.DISCORD_TOKEN || "").trim();
-if (!token) {
-  console.error("❌ DISCORD_TOKEN Render ENV'de yok/boş!");
-}
-
-// ============ WEB (Render) ============
+// =====================
+// Health server (Render ping)
+// =====================
 const app = express();
 const port = Number(process.env.PORT || 3000);
 
 app.get("/", (req, res) => res.status(200).send("OK"));
 app.get("/health", (req, res) => res.status(200).json({ status: "ok" }));
+
 app.listen(port, () => console.log(`[WEB] Listening on :${port}`));
 
-// ============ DISCORD CLIENT ============
+// =====================
+// Discord client
+// =====================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.GuildMembers,   // autorole
+    GatewayIntentBits.GuildMessages,  // delete/edit logs
+    GatewayIntentBits.MessageContent  // içerik için (Portal'da aç)
   ],
   partials: [Partials.Message, Partials.Channel]
 });
 
-// ============ LOG ============
+// =====================
+// LOG helper
+// =====================
 async function sendLog(guildOrInteraction, title, fields = []) {
   try {
-    const logCh = await client.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
-    if (!logCh) return;
+    const logChannel = await client.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
+    if (!logChannel) return;
 
-    const embed = new EmbedBuilder().setTitle(title).addFields(...fields).setTimestamp();
+    const embed = new EmbedBuilder()
+      .setTitle(title)
+      .addFields(...fields)
+      .setTimestamp();
 
     if (guildOrInteraction?.user) {
       embed.addFields(
         { name: "Yapan", value: `${guildOrInteraction.user} (\`${guildOrInteraction.user.id}\`)`, inline: false },
-        { name: "Kanal", value: `${guildOrInteraction.channel} (\`${guildOrInteraction.channelId}\`)`, inline: false }
+        { name: "Kanal", value: `${guildOrInteraction.channel} (\`${guildOrInteraction.channelId}\`)`, inline: false },
+        { name: "Sunucu", value: `${guildOrInteraction.guild?.name || "?"} (\`${guildOrInteraction.guildId}\`)`, inline: false }
       );
     }
-    await logCh.send({ embeds: [embed] });
+
+    await logChannel.send({ embeds: [embed] });
   } catch (e) {
-    console.error("sendLog error:", e);
+    console.error("Log error:", e);
   }
 }
 
@@ -90,84 +90,103 @@ function requirePerms(interaction, perms) {
   return true;
 }
 
-// ============ VOICE KEEPALIVE ============
-const SILENCE_FRAME = Buffer.from([0xF8, 0xFF, 0xFE]);
-
-function createSilenceStream() {
-  return new Readable({
-    read() {
-      this.push(SILENCE_FRAME);
-    }
-  });
-}
-
-const voicePlayers = new Map();
-
-async function connectToVoiceAndKeepAlive(voiceChannel) {
-  const connection = joinVoiceChannel({
-    channelId: voiceChannel.id,
-    guildId: voiceChannel.guild.id,
-    adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-    selfDeaf: false
-  });
-
-  await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
-
-  let entry = voicePlayers.get(voiceChannel.guild.id);
-  if (!entry) {
-    const player = createAudioPlayer();
-    entry = { player, connection };
-    voicePlayers.set(voiceChannel.guild.id, entry);
-
-    player.on(AudioPlayerStatus.Idle, () => {
-      try {
-        const silence = createAudioResource(createSilenceStream(), { inputType: StreamType.Opus });
-        player.play(silence);
-      } catch {}
-    });
-  } else {
-    entry.connection = connection;
-  }
-
-  connection.subscribe(entry.player);
-  entry.player.play(createAudioResource(createSilenceStream(), { inputType: StreamType.Opus }));
-
-  return connection;
-}
-
-// ============ COMMANDS ============
+// =====================
+// Commands
+// =====================
 const commands = [
   new SlashCommandBuilder().setName("ping").setDescription("Bot gecikmesi"),
-  new SlashCommandBuilder().setName("join").setDescription("Botu ses kanalına sokar"),
-  new SlashCommandBuilder().setName("leave").setDescription("Botu sesten çıkarır"),
 
   new SlashCommandBuilder()
-    .setName("slowmode")
-    .setDescription("Kanala yavaş mod ayarlar")
-    .addChannelOption(o => o.setName("channel").setDescription("Kanal").addChannelTypes(ChannelType.GuildText).setRequired(true))
-    .addIntegerOption(o => o.setName("seconds").setDescription("0-21600").setRequired(true)),
+    .setName("ban")
+    .setDescription("Kullanıcıyı banlar")
+    .addUserOption(o => o.setName("user").setDescription("Kişi").setRequired(true))
+    .addStringOption(o => o.setName("reason").setDescription("Sebep").setRequired(false)),
 
   new SlashCommandBuilder()
-    .setName("autorole")
-    .setDescription("Otomatik rol sistemi")
-    .addStringOption(o => o.setName("action").setDescription("set/disable/show").setRequired(true)
-      .addChoices({ name: "set", value: "set" }, { name: "disable", value: "disable" }, { name: "show", value: "show" }))
-    .addRoleOption(o => o.setName("role").setDescription("Rol (set)").setRequired(false)),
+    .setName("kick")
+    .setDescription("Kullanıcıyı kickler")
+    .addUserOption(o => o.setName("user").setDescription("Kişi").setRequired(true))
+    .addStringOption(o => o.setName("reason").setDescription("Sebep").setRequired(false)),
 
   new SlashCommandBuilder()
-    .setName("ticket")
-    .setDescription("Ticket sistemi")
-    .addStringOption(o => o.setName("action").setDescription("create/close").setRequired(true)
-      .addChoices({ name: "create", value: "create" }, { name: "close", value: "close" }))
+    .setName("timeout")
+    .setDescription("Kullanıcıyı timeout atar")
+    .addUserOption(o => o.setName("user").setDescription("Kişi").setRequired(true))
+    .addIntegerOption(o => o.setName("minutes").setDescription("Dakika (1-10080)").setRequired(true))
+    .addStringOption(o => o.setName("reason").setDescription("Sebep").setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName("untimeout")
+    .setDescription("Timeout kaldırır")
+    .addUserOption(o => o.setName("user").setDescription("Kişi").setRequired(true))
     .addStringOption(o => o.setName("reason").setDescription("Sebep").setRequired(false)),
 
   new SlashCommandBuilder()
     .setName("clear")
     .setDescription("Mesaj siler")
-    .addIntegerOption(o => o.setName("count").setDescription("1-100").setRequired(true))
+    .addIntegerOption(o => o.setName("count").setDescription("Sayı 1-100").setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName("role")
+    .setDescription("Rol ekler / alır")
+    .addUserOption(o => o.setName("user").setDescription("Kişi").setRequired(true))
+    .addRoleOption(o => o.setName("role").setDescription("Rol").setRequired(true))
+    .addStringOption(o =>
+      o.setName("action").setDescription("add/remove").setRequired(true)
+        .addChoices({ name: "add", value: "add" }, { name: "remove", value: "remove" })
+    ),
+
+  new SlashCommandBuilder()
+    .setName("warn")
+    .setDescription("Uyarı verir")
+    .addUserOption(o => o.setName("user").setDescription("Kişi").setRequired(true))
+    .addStringOption(o => o.setName("reason").setDescription("Sebep").setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName("slowmode")
+    .setDescription("Kanala yavaş mod ayarlar")
+    .addChannelOption(o =>
+      o.setName("channel").setDescription("Hangi kanal?")
+        .addChannelTypes(ChannelType.GuildText)
+        .setRequired(true)
+    )
+    .addIntegerOption(o =>
+      o.setName("seconds").setDescription("Saniye (0-21600)").setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("autorole")
+    .setDescription("Otomatik rol sistemi")
+    .addStringOption(o =>
+      o.setName("action").setDescription("set/disable/show").setRequired(true)
+        .addChoices(
+          { name: "set", value: "set" },
+          { name: "disable", value: "disable" },
+          { name: "show", value: "show" }
+        )
+    )
+    .addRoleOption(o =>
+      o.setName("role").setDescription("set için rol seç").setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("ticket")
+    .setDescription("Ticket sistemi")
+    .addStringOption(o =>
+      o.setName("action").setDescription("create/close").setRequired(true)
+        .addChoices(
+          { name: "create", value: "create" },
+          { name: "close", value: "close" }
+        )
+    )
+    .addStringOption(o =>
+      o.setName("reason").setDescription("Ticket sebebi (create için)").setRequired(false)
+    )
 ].map(c => c.toJSON());
 
-// ============ READY ============
+// =====================
+// READY + REGISTER COMMANDS
+// =====================
 client.once("ready", async () => {
   console.log(`[BOT] Logged in as ${client.user.tag}`);
 
@@ -175,28 +194,42 @@ client.once("ready", async () => {
     if (GUILD_ID) {
       const guild = await client.guilds.fetch(GUILD_ID);
       await guild.commands.set(commands);
-      console.log("[BOT] Guild commands registered (instant).");
+      console.log("[BOT] Guild slash commands registered (instant).");
     } else {
       await client.application.commands.set(commands);
-      console.log("[BOT] Global commands registered (slow).");
+      console.log("[BOT] Global slash commands registered (may take time).");
     }
   } catch (e) {
     console.error("Command register error:", e);
   }
 
-  await sendLog({ user: client.user, channel: { toString: () => "system" }, channelId: "system" }, "✅ Bot Online", [
-    { name: "Durum", value: "Bot Discord'a bağlandı.", inline: false }
+  await sendLog({ user: client.user, channel: { toString: () => "system" }, channelId: "system", guild: null, guildId: "system" }, "✅ Bot Online", [
+    { name: "Bilgi", value: "Bot başarıyla başlatıldı (voice kapalı).", inline: false }
   ]);
 });
 
-// ============ MEMBER JOIN (autorole) ============
+// =====================
+// AutoRole on member join
+// =====================
 client.on("guildMemberAdd", async (member) => {
   try {
     if (!autoroleId) return;
+
     const role = await member.guild.roles.fetch(autoroleId).catch(() => null);
     if (!role) return;
+
+    const botMember = await member.guild.members.fetchMe();
+    if (role.position >= botMember.roles.highest.position) {
+      await sendLog(member.guild, "❌ AutoRole Hata", [
+        { name: "Sebep", value: "Autorole rolü botun rolünden yüksek/eşit.", inline: false },
+        { name: "Rol", value: `${role.name} (\`${role.id}\`)`, inline: false }
+      ]);
+      return;
+    }
+
     await member.roles.add(role, "AutoRole");
-    await sendLog(member.guild, "✅ AutoRole", [
+
+    await sendLog(member.guild, "✅ AutoRole Verildi", [
       { name: "Kişi", value: `${member.user} (\`${member.user.id}\`)`, inline: false },
       { name: "Rol", value: `${role} (\`${role.id}\`)`, inline: false }
     ]);
@@ -205,149 +238,375 @@ client.on("guildMemberAdd", async (member) => {
   }
 });
 
-// ============ MESSAGE DELETE LOG ============
+// =====================
+// MESSAGE DELETE / UPDATE LOGGING
+// =====================
 client.on("messageDelete", async (message) => {
   try {
     if (!message.guild) return;
     if (message.author?.bot) return;
 
-    const author = message.author ? `${message.author} (\`${message.author.id}\`)` : "Bilinmiyor";
-    const ch = message.channel ? `${message.channel} (\`${message.channel.id}\`)` : "Bilinmiyor";
-    const content = message.content?.length ? message.content : "(içerik alınamadı)";
+    const author = message.author ? `${message.author} (\`${message.author.id}\`)` : "Bilinmiyor (partial)";
+    const channel = message.channel ? `${message.channel} (\`${message.channel.id}\`)` : "Bilinmiyor";
+    const content = message.content && message.content.length > 0 ? message.content : "(içerik alınamadı)";
+
+    const attachments =
+      message.attachments?.size
+        ? Array.from(message.attachments.values()).map(a => a.url).slice(0, 5).join("\n")
+        : null;
 
     await sendLog(message.guild, "🗑️ Mesaj Silindi", [
       { name: "Yazan", value: author, inline: false },
-      { name: "Kanal", value: ch, inline: false },
-      { name: "Mesaj", value: content.slice(0, 900), inline: false }
+      { name: "Kanal", value: channel, inline: false },
+      { name: "Mesaj", value: content.length > 900 ? content.slice(0, 900) + "…" : content, inline: false },
+      ...(attachments ? [{ name: "Dosyalar", value: attachments, inline: false }] : [])
     ]);
   } catch (e) {
-    console.error("messageDelete error:", e);
+    console.error("messageDelete log error:", e);
   }
 });
 
-// ============ INTERACTIONS ============
+client.on("messageUpdate", async (oldMsg, newMsg) => {
+  try {
+    if (!newMsg.guild) return;
+    if (newMsg.author?.bot) return;
+
+    const before = oldMsg?.content || "(önceki içerik alınamadı)";
+    const after = newMsg?.content || "(yeni içerik alınamadı)";
+
+    if (before === after) return;
+
+    const author = newMsg.author ? `${newMsg.author} (\`${newMsg.author.id}\`)` : "Bilinmiyor";
+    const channel = newMsg.channel ? `${newMsg.channel} (\`${newMsg.channel.id}\`)` : "Bilinmiyor";
+    const jump = newMsg.url ? newMsg.url : "(link yok)";
+
+    await sendLog(newMsg.guild, "✏️ Mesaj Düzenlendi", [
+      { name: "Yazan", value: author, inline: false },
+      { name: "Kanal", value: channel, inline: false },
+      { name: "Önce", value: before.length > 800 ? before.slice(0, 800) + "…" : before, inline: false },
+      { name: "Sonra", value: after.length > 800 ? after.slice(0, 800) + "…" : after, inline: false },
+      { name: "Mesaj Linki", value: jump, inline: false }
+    ]);
+  } catch (e) {
+    console.error("messageUpdate log error:", e);
+  }
+});
+
+// =====================
+// INTERACTIONS
+// =====================
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   try {
-    const cmd = interaction.commandName;
+    const { commandName } = interaction;
 
-    if (cmd === "ping") return interaction.reply({ content: `🏓 ${client.ws.ping}ms`, ephemeral: true });
-
-    if (cmd === "join") {
-      const vc = interaction.member?.voice?.channel;
-      if (!vc) return interaction.reply({ content: "❌ Önce sese gir.", ephemeral: true });
-      await interaction.deferReply({ ephemeral: true });
-      await connectToVoiceAndKeepAlive(vc);
-      await sendLog(interaction, "🎧 JOIN", [{ name: "Kanal", value: `${vc.name} (\`${vc.id}\`)`, inline: false }]);
-      return interaction.editReply({ content: `✅ Girdim: ${vc.name}` });
+    if (commandName === "ping") {
+      return interaction.reply({ content: `🏓 ${client.ws.ping}ms`, ephemeral: true });
     }
 
-    if (cmd === "leave") {
-      const conn = getVoiceConnection(interaction.guildId);
-      if (!conn) return interaction.reply({ content: "❌ Seste değilim.", ephemeral: true });
-      try { conn.destroy(); } catch {}
-      await sendLog(interaction, "🎧 LEAVE", []);
-      return interaction.reply({ content: "✅ Çıktım.", ephemeral: true });
+    if (commandName === "ban") {
+      if (!requirePerms(interaction, PermissionsBitField.Flags.BanMembers)) return;
+      const user = interaction.options.getUser("user", true);
+      const reason = interaction.options.getString("reason") || "Sebep yok";
+
+      const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+      if (!member) return interaction.reply({ content: "❌ Kullanıcı bulunamadı.", ephemeral: true });
+      if (!member.bannable) return interaction.reply({ content: "❌ Bu kullanıcıyı banlayamam.", ephemeral: true });
+
+      await member.ban({ reason });
+
+      await sendLog(interaction, "🔨 BAN", [
+        { name: "Hedef", value: `${user} (\`${user.id}\`)`, inline: false },
+        { name: "Sebep", value: reason, inline: false }
+      ]);
+
+      return interaction.reply({ content: "✅ Banlandı." });
     }
 
-    if (cmd === "clear") {
+    if (commandName === "kick") {
+      if (!requirePerms(interaction, PermissionsBitField.Flags.KickMembers)) return;
+      const user = interaction.options.getUser("user", true);
+      const reason = interaction.options.getString("reason") || "Sebep yok";
+
+      const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+      if (!member) return interaction.reply({ content: "❌ Kullanıcı bulunamadı.", ephemeral: true });
+      if (!member.kickable) return interaction.reply({ content: "❌ Bu kullanıcıyı kickleyemem.", ephemeral: true });
+
+      await member.kick(reason);
+
+      await sendLog(interaction, "👢 KICK", [
+        { name: "Hedef", value: `${user} (\`${user.id}\`)`, inline: false },
+        { name: "Sebep", value: reason, inline: false }
+      ]);
+
+      return interaction.reply({ content: "✅ Kicklendi." });
+    }
+
+    if (commandName === "timeout") {
+      if (!requirePerms(interaction, PermissionsBitField.Flags.ModerateMembers)) return;
+      const user = interaction.options.getUser("user", true);
+      const minutes = interaction.options.getInteger("minutes", true);
+      const reason = interaction.options.getString("reason") || "Sebep yok";
+
+      if (minutes < 1 || minutes > 10080) {
+        return interaction.reply({ content: "❌ Dakika aralığı: 1 - 10080", ephemeral: true });
+      }
+
+      const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+      if (!member) return interaction.reply({ content: "❌ Kullanıcı bulunamadı.", ephemeral: true });
+      if (!member.moderatable) return interaction.reply({ content: "❌ Bu kullanıcıya işlem yapamam.", ephemeral: true });
+
+      await member.timeout(minutes * 60_000, reason);
+
+      await sendLog(interaction, "🔇 TIMEOUT", [
+        { name: "Hedef", value: `${user} (\`${user.id}\`)`, inline: false },
+        { name: "Süre", value: `${minutes} dakika`, inline: true },
+        { name: "Sebep", value: reason, inline: false }
+      ]);
+
+      return interaction.reply({ content: "✅ Timeout atıldı." });
+    }
+
+    if (commandName === "untimeout") {
+      if (!requirePerms(interaction, PermissionsBitField.Flags.ModerateMembers)) return;
+      const user = interaction.options.getUser("user", true);
+      const reason = interaction.options.getString("reason") || "Sebep yok";
+
+      const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+      if (!member) return interaction.reply({ content: "❌ Kullanıcı bulunamadı.", ephemeral: true });
+
+      await member.timeout(null, reason);
+
+      await sendLog(interaction, "🔊 UNTIMEOUT", [
+        { name: "Hedef", value: `${user} (\`${user.id}\`)`, inline: false },
+        { name: "Sebep", value: reason, inline: false }
+      ]);
+
+      return interaction.reply({ content: "✅ Timeout kaldırıldı." });
+    }
+
+    if (commandName === "clear") {
       if (!requirePerms(interaction, PermissionsBitField.Flags.ManageMessages)) return;
       const count = interaction.options.getInteger("count", true);
+
+      if (count < 1 || count > 100) {
+        return interaction.reply({ content: "❌ 1-100 arası gir.", ephemeral: true });
+      }
+
       const msgs = await interaction.channel.bulkDelete(count, true).catch(() => null);
-      if (!msgs) return interaction.reply({ content: "❌ Silinemedi.", ephemeral: true });
-      await sendLog(interaction, "🧹 CLEAR", [{ name: "Silinen", value: `${msgs.size} mesaj`, inline: false }]);
+      if (!msgs) return interaction.reply({ content: "❌ Mesajlar silinemedi.", ephemeral: true });
+
+      await sendLog(interaction, "🧹 CLEAR", [
+        { name: "Silinen", value: `${msgs.size} mesaj`, inline: false }
+      ]);
+
       return interaction.reply({ content: `✅ ${msgs.size} mesaj silindi.`, ephemeral: true });
     }
 
-    if (cmd === "slowmode") {
+    if (commandName === "role") {
+      if (!requirePerms(interaction, PermissionsBitField.Flags.ManageRoles)) return;
+      const user = interaction.options.getUser("user", true);
+      const role = interaction.options.getRole("role", true);
+      const action = interaction.options.getString("action", true);
+
+      const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+      if (!member) return interaction.reply({ content: "❌ Kullanıcı bulunamadı.", ephemeral: true });
+
+      const botMember = await interaction.guild.members.fetchMe();
+      if (role.position >= botMember.roles.highest.position) {
+        return interaction.reply({ content: "❌ Bu rol benden yüksek/eşit, yönetemem.", ephemeral: true });
+      }
+
+      if (action === "add") await member.roles.add(role);
+      else await member.roles.remove(role);
+
+      await sendLog(interaction, "🎭 ROLE", [
+        { name: "Hedef", value: `${user} (\`${user.id}\`)`, inline: false },
+        { name: "Rol", value: `${role} (\`${role.id}\`)`, inline: false },
+        { name: "İşlem", value: action, inline: true }
+      ]);
+
+      return interaction.reply({ content: "✅ Rol işlemi yapıldı." });
+    }
+
+    if (commandName === "warn") {
+      if (!requirePerms(interaction, PermissionsBitField.Flags.ModerateMembers)) return;
+      const user = interaction.options.getUser("user", true);
+      const reason = interaction.options.getString("reason", true);
+
+      await sendLog(interaction, "⚠️ WARN", [
+        { name: "Hedef", value: `${user} (\`${user.id}\`)`, inline: false },
+        { name: "Sebep", value: reason, inline: false }
+      ]);
+
+      return interaction.reply({ content: "✅ Uyarı verildi." });
+    }
+
+    if (commandName === "slowmode") {
       if (!requirePerms(interaction, PermissionsBitField.Flags.ManageChannels)) return;
       const channel = interaction.options.getChannel("channel", true);
       const seconds = interaction.options.getInteger("seconds", true);
-      await channel.setRateLimitPerUser(seconds);
+
+      if (seconds < 0 || seconds > 21600) {
+        return interaction.reply({ content: "❌ 0-21600 saniye arası gir.", ephemeral: true });
+      }
+
+      await channel.setRateLimitPerUser(seconds, `Slowmode by ${interaction.user.tag}`);
+
       await sendLog(interaction, "🐢 SLOWMODE", [
         { name: "Kanal", value: `${channel} (\`${channel.id}\`)`, inline: false },
-        { name: "Süre", value: `${seconds}s`, inline: true }
+        { name: "Süre", value: `${seconds} saniye`, inline: true }
       ]);
-      return interaction.reply({ content: "✅ Ayarlandı.", ephemeral: true });
+
+      return interaction.reply({ content: `✅ ${channel} için yavaşmod: **${seconds}s**`, ephemeral: true });
     }
 
-    if (cmd === "autorole") {
+    if (commandName === "autorole") {
       if (!requirePerms(interaction, PermissionsBitField.Flags.ManageRoles)) return;
       const action = interaction.options.getString("action", true);
 
       if (action === "show") {
-        return interaction.reply({ content: autoroleId ? `✅ <@&${autoroleId}>` : "❌ Kapalı", ephemeral: true });
+        return interaction.reply({
+          content: autoroleId ? `✅ Autorole: <@&${autoroleId}> (\`${autoroleId}\`)` : "❌ Autorole kapalı.",
+          ephemeral: true
+        });
       }
+
       if (action === "disable") {
         autoroleId = null;
-        await sendLog(interaction, "🧩 AUTOROLE DISABLE", [{ name: "Durum", value: "Kapatıldı", inline: false }]);
-        return interaction.reply({ content: "✅ Kapattım.", ephemeral: true });
+
+        await sendLog(interaction, "🧩 AUTOROLE DISABLE", [
+          { name: "Durum", value: "Autorole kapatıldı.", inline: false }
+        ]);
+
+        return interaction.reply({ content: "✅ Autorole kapatıldı.", ephemeral: true });
       }
 
       const role = interaction.options.getRole("role", false);
-      if (!role) return interaction.reply({ content: "❌ Rol seç.", ephemeral: true });
+      if (!role) return interaction.reply({ content: "❌ /autorole set için rol seçmen lazım.", ephemeral: true });
+
+      const botMember = await interaction.guild.members.fetchMe();
+      if (role.position >= botMember.roles.highest.position) {
+        return interaction.reply({ content: "❌ Bu rol benden yüksek/eşit, otomatik veremem.", ephemeral: true });
+      }
+
       autoroleId = role.id;
-      await sendLog(interaction, "🧩 AUTOROLE SET", [{ name: "Rol", value: `${role} (\`${role.id}\`)`, inline: false }]);
-      return interaction.reply({ content: "✅ Ayarlandı.", ephemeral: true });
+
+      await sendLog(interaction, "🧩 AUTOROLE SET", [
+        { name: "Rol", value: `${role} (\`${role.id}\`)`, inline: false },
+        { name: "Not", value: "Kalıcı olsun istiyorsan Render ENV'e AUTOROLE_ID gir.", inline: false }
+      ]);
+
+      return interaction.reply({ content: `✅ Autorole ayarlandı: ${role}`, ephemeral: true });
     }
 
-    if (cmd === "ticket") {
+    if (commandName === "ticket") {
       const action = interaction.options.getString("action", true);
 
       if (action === "create") {
-        const reason = interaction.options.getString("reason") || "Sebep yok";
+        const reason = interaction.options.getString("reason") || "Sebep belirtilmedi";
         await interaction.deferReply({ ephemeral: true });
 
         const safeName = interaction.user.username.toLowerCase().replace(/[^a-z0-9-_]/g, "").slice(0, 12) || "user";
-        const name = `ticket-${safeName}`;
+        const channelName = `ticket-${safeName}`;
 
         const overwrites = [
           { id: interaction.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-          { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
-          { id: SUPPORT_ROLE_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
-          { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ReadMessageHistory] }
+          {
+            id: interaction.user.id,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.ReadMessageHistory,
+              PermissionFlagsBits.AttachFiles,
+              PermissionFlagsBits.EmbedLinks
+            ]
+          },
+          {
+            id: client.user.id,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.ManageChannels,
+              PermissionFlagsBits.ReadMessageHistory
+            ]
+          },
+          {
+            id: SUPPORT_ROLE_ID,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.ReadMessageHistory,
+              PermissionFlagsBits.AttachFiles,
+              PermissionFlagsBits.EmbedLinks
+            ]
+          }
         ];
 
-        const ch = await interaction.guild.channels.create({
-          name,
+        const ticketChannel = await interaction.guild.channels.create({
+          name: channelName,
           type: ChannelType.GuildText,
           parent: TICKET_CATEGORY_ID,
           permissionOverwrites: overwrites,
           topic: `Ticket Owner: ${interaction.user.tag} (${interaction.user.id}) | Reason: ${reason}`
         });
 
-        await ch.send(`🎫 ${interaction.user} ticket açtı.\nSebep: **${reason}**\nSorumlu: <@&${SUPPORT_ROLE_ID}>`);
+        await ticketChannel.send(
+          `🎫 ${interaction.user} ticket açtı.\n**Sebep:** ${reason}\nSorumlu: <@&${SUPPORT_ROLE_ID}>\nKapatmak için: \`/ticket close\``
+        );
+
         await sendLog(interaction, "🎫 TICKET CREATE", [
-          { name: "Ticket", value: `${ch} (\`${ch.id}\`)`, inline: false },
+          { name: "Ticket", value: `${ticketChannel} (\`${ticketChannel.id}\`)`, inline: false },
           { name: "Sebep", value: reason, inline: false }
         ]);
 
-        return interaction.editReply({ content: `✅ Açıldı: ${ch}` });
+        return interaction.editReply({ content: `✅ Ticket açıldı: ${ticketChannel}` });
       }
 
       if (action === "close") {
         const ch = interaction.channel;
-        if (!ch?.name?.startsWith("ticket-")) {
-          return interaction.reply({ content: "❌ Ticket kanalında kullan.", ephemeral: true });
+        if (!ch || ch.type !== ChannelType.GuildText || !ch.name.startsWith("ticket-")) {
+          return interaction.reply({ content: "❌ Bu komut sadece ticket kanalında kullanılır.", ephemeral: true });
         }
-        await sendLog(interaction, "🎫 TICKET CLOSE", [{ name: "Ticket", value: `${ch} (\`${ch.id}\`)`, inline: false }]);
-        await interaction.reply({ content: "✅ 3 sn sonra kapanacak.", ephemeral: true });
-        setTimeout(() => ch.delete("Ticket closed").catch(() => {}), 3000);
+
+        const topic = ch.topic || "";
+        const ownerMatch = topic.match(/Ticket Owner:\s.+\((\d+)\)/);
+        const ownerId = ownerMatch ? ownerMatch[1] : null;
+
+        const isOwner = ownerId && interaction.user.id === ownerId;
+        const isMod = interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageChannels);
+        const hasSupportRole = interaction.member?.roles?.cache?.has(SUPPORT_ROLE_ID);
+
+        if (!isOwner && !isMod && !hasSupportRole) {
+          return interaction.reply({ content: "❌ Ticket kapatmak için yetkin yok.", ephemeral: true });
+        }
+
+        await sendLog(interaction, "🎫 TICKET CLOSE", [
+          { name: "Ticket", value: `${ch} (\`${ch.id}\`)`, inline: false },
+          { name: "Kapanış", value: `${interaction.user} (\`${interaction.user.id}\`)`, inline: false }
+        ]);
+
+        await interaction.reply({ content: "✅ Ticket 3 saniye içinde kapanacak.", ephemeral: true });
+
+        setTimeout(async () => {
+          await ch.delete("Ticket closed").catch(() => {});
+        }, 3000);
+
         return;
       }
     }
 
-  } catch (e) {
-    console.error("interaction error:", e);
-    if (interaction.deferred) return interaction.editReply({ content: "❌ Hata." }).catch(() => {});
-    return interaction.reply({ content: "❌ Hata.", ephemeral: true }).catch(() => {});
+  } catch (err) {
+    console.error(err);
+    if (interaction.replied || interaction.deferred) {
+      interaction.followUp({ content: "❌ Hata oluştu.", ephemeral: true }).catch(() => {});
+    } else {
+      interaction.reply({ content: "❌ Hata oluştu.", ephemeral: true }).catch(() => {});
+    }
   }
 });
 
-// ============ LOGIN ============
 if (token) {
   client.login(token).catch((e) => console.error("LOGIN ERROR:", e));
-} else {
-  console.error("Bot login edilmedi çünkü token yok/boş.");
 }
