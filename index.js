@@ -34,13 +34,12 @@ if (!token) {
 }
 
 const LOG_CHANNEL_ID = "1462333582168297533";
-const TICKET_CATEGORY_ID = "1459655075134968033";
-const SUPPORT_ROLE_ID = "1459657415657001215";
 
-// Komutlar anında gelsin diye (Render ENV'e ekle): GUILD_ID
-const GUILD_ID = process.env.GUILD_ID || null;
+// Ticket ayarları (senin verdiğin)
+const TICKET_CATEGORY_ID = "1459655075134968033"; // Ticketlar bu kategori altında açılır
+const SUPPORT_ROLE_ID = "1459657415657001215";    // Ticket sorumlusu rolü
 
-// AutoRole (kalıcı olsun istiyorsan Render ENV: AUTOROLE_ID)
+// AutoRole (istersen Render ENV: AUTOROLE_ID ile kalıcı yaparsın)
 let autoroleId = process.env.AUTOROLE_ID || null;
 
 // =====================
@@ -57,16 +56,12 @@ app.listen(port, () => console.log(`[WEB] Listening on :${port}`));
 // =====================
 // Discord client
 // =====================
-// Mesaj silme/edit log için: GuildMessages + MessageContent (full içerik için)
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ],
-  partials: ["MESSAGE", "CHANNEL"] // silinen mesaj bazen partial gelebilir
+    GatewayIntentBits.GuildMembers // autorole için şart
+  ]
 });
 
 // =====================
@@ -110,16 +105,20 @@ function requirePerms(interaction, perms) {
 }
 
 // =====================
-// Voice keep-alive fix
+// Voice keep-alive fix (2 dk sonra düşme çözümü)
 // =====================
+
+// Opus “silence frame” (discord voice keepalive için yaygın yöntem)
 const SILENCE_FRAME = Buffer.from([0xF8, 0xFF, 0xFE]);
 
 function createSilenceStream() {
-  return new Readable({
+  const stream = new Readable({
     read() {
+      // 20ms frame aralığı gibi düşün (çok hafif yük)
       this.push(SILENCE_FRAME);
     }
   });
+  return stream;
 }
 
 const voicePlayers = new Map(); // guildId -> { player, connection }
@@ -132,8 +131,10 @@ async function connectToVoiceAndKeepAlive(voiceChannel) {
     selfDeaf: false
   });
 
+  // Ready bekle
   await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
 
+  // Keep-alive player
   let entry = voicePlayers.get(voiceChannel.guild.id);
   if (!entry) {
     const player = createAudioPlayer();
@@ -142,6 +143,7 @@ async function connectToVoiceAndKeepAlive(voiceChannel) {
 
     player.on("error", (e) => console.error("AudioPlayer error:", e));
 
+    // Player idle olursa tekrar silence bas
     player.on(AudioPlayerStatus.Idle, () => {
       try {
         const silence = createAudioResource(createSilenceStream(), { inputType: StreamType.Opus });
@@ -152,10 +154,12 @@ async function connectToVoiceAndKeepAlive(voiceChannel) {
     entry.connection = connection;
   }
 
+  // Subscribe + silence başlat
   connection.subscribe(entry.player);
   const silence = createAudioResource(createSilenceStream(), { inputType: StreamType.Opus });
   entry.player.play(silence);
 
+  // Disconnect olursa toparlama
   connection.on("stateChange", async (_, newState) => {
     if (newState.status === VoiceConnectionStatus.Disconnected) {
       try {
@@ -274,24 +278,14 @@ const commands = [
 ].map(c => c.toJSON());
 
 // =====================
-// READY + REGISTER COMMANDS
+// READY
 // =====================
 client.once("ready", async () => {
   console.log(`[BOT] Logged in as ${client.user.tag}`);
+  await client.application.commands.set(commands);
+  console.log("[BOT] Slash commands registered.");
 
-  try {
-    if (GUILD_ID) {
-      const guild = await client.guilds.fetch(GUILD_ID);
-      await guild.commands.set(commands);
-      console.log("[BOT] Guild slash commands registered (instant).");
-    } else {
-      await client.application.commands.set(commands);
-      console.log("[BOT] Global slash commands registered (may take time).");
-    }
-  } catch (e) {
-    console.error("Command register error:", e);
-  }
-
+  // küçük online log
   const anyGuild = client.guilds.cache.first();
   if (anyGuild) {
     await sendLog(anyGuild, "✅ Bot Online", [
@@ -301,7 +295,7 @@ client.once("ready", async () => {
 });
 
 // =====================
-// AUTOROLE on join
+// AutoRole on member join
 // =====================
 client.on("guildMemberAdd", async (member) => {
   try {
@@ -331,65 +325,7 @@ client.on("guildMemberAdd", async (member) => {
 });
 
 // =====================
-// MESSAGE DELETE / EDIT LOGGING
-// =====================
-client.on("messageDelete", async (message) => {
-  try {
-    if (!message.guild) return;
-
-    // bot mesajlarını loglamayalım (istersen kaldır)
-    if (message.author?.bot) return;
-
-    const author = message.author ? `${message.author} (\`${message.author.id}\`)` : "Bilinmiyor (cache/partial)";
-    const channel = message.channel ? `${message.channel} (\`${message.channel.id}\`)` : "Bilinmiyor";
-    const content = message.content && message.content.length > 0 ? message.content : "(içerik alınamadı)";
-
-    const attachments =
-      message.attachments?.size
-        ? Array.from(message.attachments.values()).map(a => a.url).slice(0, 5).join("\n")
-        : null;
-
-    await sendLog(message.guild, "🗑️ Mesaj Silindi", [
-      { name: "Yazan", value: author, inline: false },
-      { name: "Kanal", value: channel, inline: false },
-      { name: "Mesaj", value: content.length > 900 ? content.slice(0, 900) + "…" : content, inline: false },
-      ...(attachments ? [{ name: "Dosyalar", value: attachments, inline: false }] : [])
-    ]);
-  } catch (e) {
-    console.error("messageDelete log error:", e);
-  }
-});
-
-client.on("messageUpdate", async (oldMsg, newMsg) => {
-  try {
-    if (!newMsg.guild) return;
-    if (newMsg.author?.bot) return;
-
-    // partial olabilir
-    const before = oldMsg?.content || "(önceki içerik alınamadı)";
-    const after = newMsg?.content || "(yeni içerik alınamadı)";
-
-    // içerik aynıysa boşuna loglama (embed vs değişmiş olabilir)
-    if (before === after) return;
-
-    const author = newMsg.author ? `${newMsg.author} (\`${newMsg.author.id}\`)` : "Bilinmiyor";
-    const channel = newMsg.channel ? `${newMsg.channel} (\`${newMsg.channel.id}\`)` : "Bilinmiyor";
-    const jump = newMsg.url ? newMsg.url : "(link yok)";
-
-    await sendLog(newMsg.guild, "✏️ Mesaj Düzenlendi", [
-      { name: "Yazan", value: author, inline: false },
-      { name: "Kanal", value: channel, inline: false },
-      { name: "Önce", value: before.length > 800 ? before.slice(0, 800) + "…" : before, inline: false },
-      { name: "Sonra", value: after.length > 800 ? after.slice(0, 800) + "…" : after, inline: false },
-      { name: "Mesaj Linki", value: jump, inline: false }
-    ]);
-  } catch (e) {
-    console.error("messageUpdate log error:", e);
-  }
-});
-
-// =====================
-// INTERACTIONS (COMMANDS)
+// INTERACTIONS
 // =====================
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
@@ -401,7 +337,7 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: `🏓 ${client.ws.ping}ms`, ephemeral: true });
     }
 
-    // join
+    // ---- join
     if (commandName === "join") {
       const vc = interaction.member?.voice?.channel;
       if (!vc) return interaction.reply({ content: "❌ Önce bir ses kanalına gir.", ephemeral: true });
@@ -418,22 +354,24 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.editReply({ content: `✅ Sese girdim: **${vc.name}**` });
     }
 
-    // leave
+    // ---- leave
     if (commandName === "leave") {
       const conn = getVoiceConnection(interaction.guildId);
       if (!conn) return interaction.reply({ content: "❌ Zaten ses kanalında değilim.", ephemeral: true });
 
+      // player stop
       const entry = voicePlayers.get(interaction.guildId);
       if (entry?.player) {
         try { entry.player.stop(true); } catch {}
       }
+
       try { conn.destroy(); } catch {}
 
       await sendLog(interaction, "🎧 LEAVE", []);
       return interaction.reply({ content: "✅ Sesten çıktım.", ephemeral: true });
     }
 
-    // ban
+    // ---- ban
     if (commandName === "ban") {
       if (!requirePerms(interaction, PermissionsBitField.Flags.BanMembers)) return;
       const user = interaction.options.getUser("user", true);
@@ -453,7 +391,7 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: "✅ Banlandı." });
     }
 
-    // kick
+    // ---- kick
     if (commandName === "kick") {
       if (!requirePerms(interaction, PermissionsBitField.Flags.KickMembers)) return;
       const user = interaction.options.getUser("user", true);
@@ -473,7 +411,7 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: "✅ Kicklendi." });
     }
 
-    // timeout
+    // ---- timeout
     if (commandName === "timeout") {
       if (!requirePerms(interaction, PermissionsBitField.Flags.ModerateMembers)) return;
       const user = interaction.options.getUser("user", true);
@@ -499,7 +437,7 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: "✅ Timeout atıldı." });
     }
 
-    // untimeout
+    // ---- untimeout
     if (commandName === "untimeout") {
       if (!requirePerms(interaction, PermissionsBitField.Flags.ModerateMembers)) return;
       const user = interaction.options.getUser("user", true);
@@ -518,7 +456,7 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: "✅ Timeout kaldırıldı." });
     }
 
-    // clear
+    // ---- clear
     if (commandName === "clear") {
       if (!requirePerms(interaction, PermissionsBitField.Flags.ManageMessages)) return;
       const count = interaction.options.getInteger("count", true);
@@ -537,7 +475,7 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: `✅ ${msgs.size} mesaj silindi.`, ephemeral: true });
     }
 
-    // role
+    // ---- role
     if (commandName === "role") {
       if (!requirePerms(interaction, PermissionsBitField.Flags.ManageRoles)) return;
       const user = interaction.options.getUser("user", true);
@@ -564,7 +502,7 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: "✅ Rol işlemi yapıldı." });
     }
 
-    // warn
+    // ---- warn
     if (commandName === "warn") {
       if (!requirePerms(interaction, PermissionsBitField.Flags.ModerateMembers)) return;
       const user = interaction.options.getUser("user", true);
@@ -578,7 +516,9 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: "✅ Uyarı verildi." });
     }
 
-    // slowmode
+    // =====================
+    // SLOWMODE
+    // =====================
     if (commandName === "slowmode") {
       if (!requirePerms(interaction, PermissionsBitField.Flags.ManageChannels)) return;
 
@@ -599,7 +539,9 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: `✅ ${channel} için yavaşmod: **${seconds}s**`, ephemeral: true });
     }
 
-    // autorole
+    // =====================
+    // AUTOROLE
+    // =====================
     if (commandName === "autorole") {
       if (!requirePerms(interaction, PermissionsBitField.Flags.ManageRoles)) return;
 
@@ -642,10 +584,13 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: `✅ Autorole ayarlandı: ${role}`, ephemeral: true });
     }
 
-    // ticket
+    // =====================
+    // TICKET SYSTEM
+    // =====================
     if (commandName === "ticket") {
       const action = interaction.options.getString("action", true);
 
+      // create
       if (action === "create") {
         const reason = interaction.options.getString("reason") || "Sebep belirtilmedi";
         const guild = interaction.guild;
@@ -711,6 +656,7 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.editReply({ content: `✅ Ticket açıldı: ${ticketChannel}` });
       }
 
+      // close
       if (action === "close") {
         const ch = interaction.channel;
         if (!ch || ch.type !== ChannelType.GuildText || !ch.name.startsWith("ticket-")) {
