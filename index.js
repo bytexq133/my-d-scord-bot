@@ -1,3 +1,5 @@
+console.log("### BOT STARTING ###");
+console.log("ENV TOKEN LEN:", (process.env.DISCORD_TOKEN || "").trim().length);
 require("dotenv").config();
 
 const express = require("express");
@@ -351,3 +353,4 @@ if (token) {
 } else {
   console.error("Bot login edilmedi çünkü token yok/boş.");
 }
+
